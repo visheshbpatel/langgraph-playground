@@ -1,0 +1,90 @@
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from typing import TypedDict, Annotated
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_core.tools import tool
+from langchain_mcp_adapters.client import MultiServerMCPClient
+import asyncio
+import os
+
+
+
+load_dotenv()
+
+model = ChatOpenAI(
+    model="openai/gpt-oss-20b",
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url= os.getenv("GROQ_BASE_URL"),
+    max_tokens=300,
+    temperature=0.5
+)
+
+# mcp client from local fastmcp server
+
+client = MultiServerMCPClient(
+    {
+        "arith": {
+            "transport": "stdio",
+            "command": r"V:\Project Eagle\langgraph-playground\.venv\Scripts\python.exe",
+            "args": [
+                r"V:\Project Eagle\langgraph-playground\17-mcp-langgraph\main.py"
+            ],
+        },
+        "expense": {
+                "transport": "streamable_http", 
+                "url": "https://expence-tracker-mcp-vbp.fastmcp.app/mcp"
+        }
+    }
+)
+
+
+
+# state
+class ChatState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+
+async def build_graph():
+
+    tools = await client.get_tools()
+
+    llm_with_tools = model.bind_tools(tools)
+
+    async def chat_node(state: ChatState):
+
+        messages = state['messages']
+        response = await llm_with_tools.ainvoke(messages)
+        return {'messages':[response]}
+
+    tool_node = ToolNode(tools)  # the internal implementation of this is already async
+
+    # graph structure
+
+    graph = StateGraph(ChatState)
+    graph.add_node('chat_node', chat_node)
+    graph.add_node('tools', tool_node)
+
+    graph.add_edge(START, 'chat_node')
+    graph.add_conditional_edges('chat_node', tools_condition)
+    graph.add_edge('tools', 'chat_node')
+
+    chatbot = graph.compile()
+
+
+    return chatbot
+
+
+async def main():
+
+    chatbot = await build_graph()
+
+    result = await chatbot.ainvoke({"messages":[HumanMessage(content="Give me the expence till date")]})
+    print(result["messages"][1].content)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
